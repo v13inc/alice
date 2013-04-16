@@ -2,13 +2,39 @@
 
 var alice = require('./alice.js');
 var repl = require('repl');
+var cli = require('cli');
+var fs = require('fs');
 
-repl.start({
-  prompt: '> ',
-  eval: function(cmd, context, filename, callback) {
-    var cmd = cmd.substr(0, cmd.length - 1).substr(1).trim(); // for some reason cmd has an added ( at the start and ) at end?!?
-    alice.execute(cmd);
-    console.log('__: ' + alice._values.join(' '));
-    callback();
+cli.parse({
+  stdin: ['s', 'Read from STDIN']
+});
+
+
+var startRepl = function() {
+  repl.start({
+    prompt: '> ',
+    eval: function(cmd, context, filename, callback) {
+      var cmd = cmd.substr(0, cmd.length - 1).substr(1).trim(); // for some reason cmd has an added ( at the start and ) at end?!?
+      alice.execute(cmd);
+      console.log('__: ' + alice._values.join(' '));
+      callback();
+    }
+  });
+}
+
+var execData = function(data) {
+  alice.execute(data);
+}
+
+cli.main(function(args, options) {
+  if(options.stdin) {
+    cli.withStdin(function(data) {
+      execData(data);
+    });
+  } else if(cli.args.length > 0) {
+    var program = fs.readFileSync(cli.args[0]);
+    execData(String(program));
+  } else {
+    startRepl();
   }
 });

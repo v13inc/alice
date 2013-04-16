@@ -418,7 +418,7 @@ log_lists = function(lists, colors, textColor) {
       var list = lists[l];
       logStrs.push(list.join(', '));
     }
-    console.log(logStrs.join(' | '));
+    console.log(textColor + ': ' + logStrs.join(' | '));
   }
 }
 
@@ -442,6 +442,7 @@ pv = print_values = function() {
 token = function(line, delimiters) {
   // ensure delimeters is an array
   var delimiters = delimiters.push ? delimiters : [delimiters];
+
   var _token = function(delimiter) {
     var delIndex = line.indexOf(delimiter);
     if(delIndex == -1) return '';
@@ -449,19 +450,22 @@ token = function(line, delimiters) {
     return line.substr(0, delIndex);
   }
 
+  // grab tokens using all the delimiters, and return the shortest one
+  var shortestWord;
   for(var i in delimiters) {
     var word = _token(delimiters[i]);
-    if(word) return word;
+    if(shortestWord === undefined) shortestWord = word;
+    if(word && word.length < shortestWord.length) shortestWord = word;
   }
 
-  return line;
+  return shortestWord || line;
 }
 
 parser = function() {
   var program = arg();
 
   if(program) {
-    var word = token(program, [' ', '\t', '\n']) || program;
+    var word = token(program, [' ', '\t', '\n']);
     var delimeter = program[word.length];
     var lastWord = word.length == program.length;
     if(word != '') {
