@@ -19,6 +19,15 @@ var repeat = function(num, callback) {
   for(var i = 0; i < num; i++) callback(num);
 }
 
+var clone = function(obj) {
+  if(obj == null || typeof obj != 'object') return obj;
+  var copy = obj.constructor();
+  for (var attr in obj) {
+    if (obj.hasOwnProperty(attr)) copy[attr] = obj[attr];
+  }
+  return copy;
+}
+
 var log_lists = function(lists, prefix) {
   var prefix = prefix ? prefix + ': ' : '';
   var logStrs = map(lists, function(list) {
@@ -51,35 +60,37 @@ var stackFunction = A.stackFunction = function(numArgs, callback) {
   }
 }
 
-var codeBlock = A.codeBlock = function(code, defer) {
-  var block = function() { execute(code); };
-  block.defer = defer;
-  return block;
-}
-
 //
 // Data structures
 //
 
 var mem = A.mem = {
-  // _stacks
-  _values: [],
-  _words: [],
+  _block: [],
+  // built-in dictionaries
+  $parse: {}, // parse words
+  $value: {}, // value words
 
-  // control characters
-  libc: {}, // build-in
-  c: {}, // run-time
-
-  // value dictionaries
-  libv: {}, // built-in
-  v: {},  // run-time
-  // parse dictionaries
-  libp: {}, // built-in
-  p: {}, // run-time
+  wordBlock: {
+    code: '',
+    _value: [],
+    _parse: [],
+    $parse: {},
+    $value: {},
+  }
 }
 
-// store a reference to the values stack, since we use it all the time
-var __ = mem._values;
+// this helper returns a reference to the current block memory, and allocates memory if needed
+var $block = function(allocate) {
+  if(allocate || mem._blocks.length == 0) {
+    mem._blocks.push(clone(mem.wordBlock));
+  }
+  // return the block memory at the top of the _block stack
+  return mem._block.slice(-1)[0];
+}
+
+var $blockEnd = function() {
+  return mem._block.pop();
+}
 
 // 
 // Parser and Executor
@@ -116,7 +127,7 @@ var parser = A.parser = stackFunction(1, function(program) {
   var delimeter = program[word.length];
 
   // lookup possible parse and control character blocks
-  var parseBlock = mem.p[word] || mem.libp[word];
+  var parseBlock = mem.p[word] || mem.$parse[word];
   var controlChar = mem.c[word[0]] || mem.libc[word[0]];
   var block = parseBlock || controlChar;
 
@@ -135,7 +146,7 @@ var parser = A.parser = stackFunction(1, function(program) {
     // also, the program needs to be off the stack when we call executer()
     __.push(program); block(); program = __.pop();
   } else {
-    $exec('_push', word, mem._words);
+    exec('_push', word, mem._words);
   }
 
   // start executing once we hit the end of the line, or the end of the program
@@ -146,13 +157,13 @@ var parser = A.parser = stackFunction(1, function(program) {
 });
 
 var executer = A.executer = function() {
-  var word = $execPop('_pop', mem._words);
+  var word = execPop('_pop', mem._words);
 
   // if the word is a block, execute it. Otherwise look it up in the variables
   if(typeof word == 'function' && !word.defer) {
     word();
   } else if(word) {
-    var block = mem.v[word] || mem.libv[word];
+    var block = mem.v[word] || mem.$value[word];
 
     if(block) {
       // if we found a block, execute it or push it onto the _values stack
@@ -187,71 +198,83 @@ var execute = A.execute = function(program) {
 
 // helper to call built-in lib words. To avoid chicken-and-egg problems, it calls the manipulates the 
 // _values stack and calls the word block directly. Consequently, this helper only works with value words.
-var $exec = A.$exec = function() {
-  var word = Array.prototype.shift.apply(arguments);
-  for(var i in arguments) {
-    __.push(arguments[i]);
+// This helper actually implements it's own (very) dumb parser.
+var exec = A.exec = function() {
+  // allocate a new block for this exec call
+  $block(true);
+
+  var _exec = function(words) {
+    if(words.length == 0) return;
+
+    var word = words.pop();
+    if(typeof word == 'function') word();
+    else $block()._values.push(word);
+    _exec(words);
   }
 
-  mem.libv[word]();
+  // copy over the arguments into a words array, splitting up any strings by spaces 
+  var words = [];
+  each(arguments, function(arg) { words = words.concat(arg.split ? arg.split(' ') : [arg]); });
+  // replace any words with $value blocks, if available
+  words = map(words, function(word) { return mem.$value[word] || word; });
+  // recursively pop off words and execute them, or push them onto the _value stack
+  _exec(words);
+
+  $blockEnd();
 }
 
 // run exec and pop a value of the _values stack
-var $execPop = A.$execPop = function() {
-  $exec.apply(this, arguments);
+var execPop = A.execPop = function() {
+  exec.apply(this, arguments);
   return __.pop();
 }
 
 // Helper to create infix words (a MYWORD b)
-var $infix = A.$infix = function(word, block, extraParseBlock) {
+var wordInfix = A.wordInfix = function(word, block, extraParseBlock) {
   var valueWord = '_' + word;
   // create a parse block to flip arguments
   var parseBlock = function() {
-    $exec('_push', valueWord, mem._words); // push on the prefixed word to be called in the execute phase
-    $exec('_swap', mem._words); // swap the first arg and the word to convert to prefix notation
+    var _parse = $block()._parse;
+    exec('_push', valueWord, _parse); // push on the prefixed word to be called in the execute phase
+    exec('_swap', _parse); // swap the first arg and the word to convert to prefix notation
 
     if(extraParseBlock) extraParseBlock();
   }
 
-  mem.libv[valueWord] = block;
-  mem.libp[word] = parseBlock;
+  mem.$value[valueWord] = block;
+  mem.$parse[word] = parseBlock;
 }
 
 // Helper to create prefix words (MYWORD a b)
-var $prefix = A.$prefix = function(word, block, extraParseBlock) {
-  mem.libv[word] = block;
-  if(extraParseBlock) mem.libp[word] = extraParseBlock;
+var wordPrefix = A.wordPrefix = function(word, block, extraParseBlock) {
+  mem.$value[word] = block;
+  if(extraParseBlock) mem.$parse[word] = extraParseBlock;
 }
 
 // Helper to create postfix words (a b MYWORD)
-var $postfix = A.$postfix = function(word, block, extraParseBlock) {
+var wordPostfix = A.wordPostfix = function(word, block, extraParseBlock) {
   var valueWord = '_' + word;
-  var parseBlock = stackFunction(1, function(line) {
-    // insert the value word after the top 2 words on the _words list
-    $exec('_insert', valueWord, -3, mem._words);
+  var parseBlock = stackFunction(1, function(code) {
+    // insert the value word after the top 2 words on the _parse stack
+    exec('_insert', valueWord, -3, $block()._parse);
 
-    __.push(line);
+    exec('_push', code, '__');
 
     if(extraParseBlock) extraParseBlock();
   });
 
-  mem.libv[valueWord] = block;
-  mem.libp[word] = parseBlock;
+  mem.$value[valueWord] = block;
+  mem.$parse[word] = parseBlock;
 }
 
-// Helper to create parse words. Similar to $prefix, but without a value block by default
-var $parse = A.$parse = function(word, block, extraValueBlock) {
-  if(extraValueBlock) mem.libv[word] = extraValueBlock;
-  mem.libp[word] = block;
-}
-
-// Helper to create control characters. These can only be found at the beginning of words
-var $char = A.$char = function(char, block) {
-  mem.libc[char] = block;
+// Helper to create parse words. Similar to wordPrefix, but without a value block by default
+var wordParse = A.wordParse = function(word, block, extraValueBlock) {
+  if(extraValueBlock) mem.$value[word] = extraValueBlock;
+  mem.$parse[word] = block;
 }
 
 // helper to create parse functions that build blocks
-var $block = A.$block = function(startWord, endWord, block) {
+var wordBlock = A.wordBlock = function(startWord, endWord, block) {
   var bracketToken = function(line, startWord, endWord, count) {
     var count = count || 0, token = '', character;
     do {
@@ -265,14 +288,14 @@ var $block = A.$block = function(startWord, endWord, block) {
     return token.slice(0, -1); // trim the final bracket off the token
   }
 
-  $char(startWord, stackFunction(1, function(line) {
+  wordParse(startWord, stackFunction(1, function(line) {
     // grab all the words until we hit the block end word
     var code = bracketToken(line, startWord, endWord, 1);
-    __.push(code);
+    exec('_push', code, '__');
     block();
 
     line = line.substring(code.length + 2); // strip the block from the remaining line
-    __.push(line);
+    exec('_push', line, '__');
   }));
 }
 
@@ -281,100 +304,110 @@ var $block = A.$block = function(startWord, endWord, block) {
 //
 
 // List Functions
-$prefix('_', function() {
-  $exec('_push', [], __);
+wordPrefix('_', function() {
+  exec('_push', [], '__');
 });
 
-$infix('len', stackFunction(1, function(list) {
-  $exec('_push', list.length, __);
+wordInfix('len', stackFunction(1, function(list) {
+  exec('_push', list.length, '__');
 }));
 
-$infix('push', stackFunction(2, function(list, item) {
+wordInfix('push', stackFunction(2, function(list, item) {
   list.push(item);
 }));
 
-$infix('pop', stackFunction(1, function(list) {
-  $exec('_push', list.pop(), __);
+wordInfix('pop', stackFunction(1, function(list) {
+  exec('_push', list.pop(), '__');
 }));
 
-$infix('drop', stackFunction(1, function(list) {
+wordInfix('drop', stackFunction(1, function(list) {
   list.pop();
 }));
 
-$infix('insert', stackFunction(3, function(list, index, item) {
+wordInfix('insert', stackFunction(3, function(list, index, item) {
   if(index < 0) index = list.length + index;
   list.splice(index - 1, 0, item);
 }));
 
-$infix('set', stackFunction(3, function(list, index, item) {
+wordInfix('set', stackFunction(3, function(list, index, item) {
   if(index < 0) index = list.length + index;
   list[index - 1] = item;
 }));
 
-$infix(':', stackFunction(2, function(list, index) {
-  $exec('_push', list[index - 1], __);
+wordInfix(':', stackFunction(2, function(list, index) {
+  exec('_push', list[index - 1], '__');
 }));
 
-$infix('swap', stackFunction(1, function(list) {
-  var a = $execPop('_pop', list);
-  var b = $execPop('_pop', list);
-  $exec('_push', a, list);
-  $exec('_push', b, list);
+wordInfix('swap', stackFunction(1, function(list) {
+  var a = execPop('_pop', list);
+  var b = execPop('_pop', list);
+  exec('_push', a, list);
+  exec('_push', b, list);
 }));
 
-// easy reference to _values and _words
-$prefix('__', function() { __.push(mem._values) });
-$prefix('_w', function() { __.push(mem._words) });
+wordInfix('dup', stackFunction(1, function(list) {
+  list.push(list.slice(-1)[0]);
+}));
 
-// = adds a word to libv
-$infix('=', stackFunction(2, function(word, block) {
-  mem.v[word] = block;
+// Functions to manipulate block stacks and dictionaries
+wordPrefix('__', function() {
+  // push a reference to the current _value stack onto _values (meta!)
+  // NOTE: _push relies on this word, so we have to push manually (poor DRY)
+  $block()._value.push($block()._value);
+});
+
+// = adds a word to $value
+wordInfix('=', stackFunction(2, function(word, block) {
+  $block().$value[word] = block;
 }), function() {
+  var _parse = $block()._parse;
   // add a ' to the first argument, so we can overwrite existing words
-  var a = $execPop('_pop', mem._words);
-  $exec('_push', "'" + a, mem._words);
+  var a = execPop('_pop', _parse);
+  exec('_push', "'" + a, _parse);
 });
 
 // Math functions
-$infix('+', stackFunction(2, function(a, b) {
-  __.push(Number(a) + Number(b)); 
+wordInfix('+', stackFunction(2, function(a, b) {
+  exec('_push', Number(a) + Number(b), '__'); 
 }));
 
-$infix('-', stackFunction(2, function(a, b) {
-  __.push(Number(a) - Number(b)); 
+wordInfix('-', stackFunction(2, function(a, b) {
+  exec('_push', Number(a) - Number(b), '__'); 
 }));
 
-$infix('*', stackFunction(2, function(a, b) {
-  __.push(Number(a) * Number(b)); 
+wordInfix('*', stackFunction(2, function(a, b) {
+  exec('_push', Number(a) * Number(b), '__'); 
 }));
 
-$infix('/', stackFunction(2, function(a, b) {
-  __.push(Number(a) / Number(b)); 
+wordInfix('/', stackFunction(2, function(a, b) {
+  exec('_push', Number(a) / Number(b), '__'); 
 }));
 
-$infix('%', stackFunction(2, function(a, b) {
-  __.push(Number(a) % Number(b)); 
+wordInfix('%', stackFunction(2, function(a, b) {
+  exec('_push', Number(a) % Number(b), '__'); 
 }));
 
-$prefix('print', stackFunction(1, function(item) {
+wordPrefix('print', stackFunction(1, function(item) {
   console.log(item);
 }));
 
 // ! executes the block on the top of the _values stack
-$prefix('!', stackFunction(1, function(word) {
-  block = typeof word == 'function' ? word : mem.v[word] || mem.libv[word];
+wordPrefix('!', stackFunction(1, function(word) {
+  block = typeof word == 'function' ? word : mem.v[word] || mem.$value[word];
   if(typeof block == 'function') block();
 }));
 
 // !! is like !, but keeps the block on the stack
-$prefix('!!', stackFunction(1, function(block) {
-  __.push(block); __.push(block);
-  mem.libv['!']();
+wordPrefix('!!', stackFunction(0, function() {
+  exec('_dup __');
+  mem.$value['!']();
 }));
 
 // " quotes strings and stops them from being parsed.
-$block('"', '"', stackFunction(1, function(code) { $exec('_push', code, mem._words) }));
+wordBlock('"', '"', stackFunction(1, function(code) { exec('_push', code, mem._words) }));
 // () executes immediately
-$block('(', ')', stackFunction(1, function(code) { $exec('_push', codeBlock(code), mem._words) }));
+wordBlock('(', ')', stackFunction(1, function(code) { exec('_push', codeBlock(code), mem._words) }));
 // {} defers execution until later
-$block('{', '}', stackFunction(1, function(code) { $exec('_push', codeBlock(code, true), mem._words) }));
+wordBlock('{', '}', stackFunction(1, function(code) { exec('_push', codeBlock(code, true), mem._words) }));
+
+execute('(1+1)');
