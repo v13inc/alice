@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-var alice = require('./alice.js');
+var alice = require('./alice.js').Alice;
 var repl = require('repl');
 var cli = require('cli');
 var fs = require('fs');
@@ -16,7 +16,7 @@ var startRepl = function() {
     eval: function(cmd, context, filename, callback) {
       var cmd = cmd.substr(0, cmd.length - 1).substr(1).trim(); // for some reason cmd has an added ( at the start and ) at end?!?
       alice.execute(cmd);
-      console.log('__: ' + alice._values.join(' '));
+      console.log('__: ' + alice.mem._values.join(' '));
       callback();
     }
   });
