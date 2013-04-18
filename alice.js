@@ -66,14 +66,16 @@ var mem = A.mem = {
   _values: [],
   _words: [],
 
-  // run-time dictionaries
-  v: {}, // value
-  p: {}, // parse
+  // control characters
+  libc: {}, // build-in
+  c: {}, // run-time
 
-  // built-in value words
-  libv: {},
-  // built-in parse words
-  libp: {},
+  // value dictionaries
+  libv: {}, // built-in
+  v: {},  // run-time
+  // parse dictionaries
+  libp: {}, // built-in
+  p: {}, // run-time
 }
 
 // store a reference to the values stack, since we use it all the time
@@ -112,17 +114,27 @@ var parser = A.parser = stackFunction(1, function(program) {
   // grab the next word
   var word = token(program, [' ', '\t', '\n']);
   var delimeter = program[word.length];
-  var lastWord = word.length == program.length;
-  // trim the word from the program
-  program = program.substring(word.length + 1);
-  // call the parse function if it exists
-  var p_block = mem.p[word.trim()] || mem.libp[word.trim()];
-  if(p_block) {
-    // we need to put the program back on the stack temporarily for the parse block.
-    // also, the program needs to be off the stack when we call executer()
-    __.push(program); p_block(); program = __.pop();
+
+  // lookup possible parse and control character blocks
+  var parseBlock = mem.p[word] || mem.libp[word];
+  var controlChar = mem.c[word[0]] || mem.libc[word[0]];
+  var block = parseBlock || controlChar;
+
+  // allow words with parse blocks to override control chars
+  if(controlChar && !parseBlock) {
+    // trim off the control char
+    program = program.substr(1);
   } else {
-    // push word onto the _words list
+    // trim the word from the program
+    program = program.substring(word.length + 1);
+  }
+
+  // call the parse function if it exists
+  if(block) {
+    // we need to put the program back on the stack temporarily for the block.
+    // also, the program needs to be off the stack when we call executer()
+    __.push(program); block(); program = __.pop();
+  } else {
     $exec('_push', word, mem._words);
   }
 
@@ -146,8 +158,9 @@ var executer = A.executer = function() {
       // if we found a block, execute it or push it onto the _values stack
       typeof block == 'function' ? block() : __.push(block);
     } else {
-      // push the word onto __ as a literal value, and remove the leading ', if needed
+      // we strip off the leading ', if it exists, which allows us to use 'myword to defer execution
       if(word.indexOf && word.indexOf("'") == 0) word = word.substr(1);
+      // push the word onto __ as a literal value
       __.push(word);
     }
 
@@ -232,32 +245,34 @@ var $parse = A.$parse = function(word, block, extraValueBlock) {
   mem.libp[word] = block;
 }
 
+// Helper to create control characters. These can only be found at the beginning of words
+var $char = A.$char = function(char, block) {
+  mem.libc[char] = block;
+}
+
 // helper to create parse functions that build blocks
-var $block = A.$block = function(startWord, endWord, defer, extraParseBlock) {
+var $block = A.$block = function(startWord, endWord, block) {
   var bracketToken = function(line, startWord, endWord, count) {
     var count = count || 0, token = '', character;
     do {
       character = line[token.length];
       token += character;
 
-      if(character == startWord) count++;
+      if(character == startWord && startWord != endWord) count++;
       else if(character == endWord) count--;
     } while(count != 0);
 
     return token.slice(0, -1); // trim the final bracket off the token
   }
 
-  $parse(startWord, stackFunction(1, function(line) {
+  $char(startWord, stackFunction(1, function(line) {
     // grab all the words until we hit the block end word
     var code = bracketToken(line, startWord, endWord, 1);
+    __.push(code);
+    block();
+
     line = line.substring(code.length + 2); // strip the block from the remaining line
-
-    // add the code block to the _words list
-    $exec('_push', codeBlock(code, defer), mem._words);
-
     __.push(line);
-
-    if(extraParseBlock) extraParseBlock();
   }));
 }
 
@@ -347,13 +362,7 @@ $prefix('print', stackFunction(1, function(item) {
 
 // ! executes the block on the top of the _values stack
 $prefix('!', stackFunction(1, function(word) {
-  if(typeof word == 'function') {
-    var block = word;
-  } else {
-    // lookup the word
-    block = mem.v[word] || mem.libv[word];
-  }
-
+  block = typeof word == 'function' ? word : mem.v[word] || mem.libv[word];
   if(typeof block == 'function') block();
 }));
 
@@ -363,24 +372,9 @@ $prefix('!!', stackFunction(1, function(block) {
   mem.libv['!']();
 }));
 
-// ' defers the next word from executing
-$parse("'", stackFunction(1, function(line) {
-  __.push("'" + line.trim());
-}));
-
 // " quotes strings and stops them from being parsed.
-$parse('"', stackFunction(1, function(line) {
-  // grab all the text until the ending quote
-  var str = token(line, '"');
-  var line = line.substring(str.length + 2).trim();
-
-  // push the quoted string onto _words
-  $exec('_push', str, mem._words);
-
-  __.push(line);
-}));
-
-// setup our code block words
-$block('(', ')'); // immediate execution
-$block("'(", ')', true); // defer execution
-$block('{', '}', true); // defer execution
+$block('"', '"', stackFunction(1, function(code) { $exec('_push', code, mem._words) }));
+// () executes immediately
+$block('(', ')', stackFunction(1, function(code) { $exec('_push', codeBlock(code), mem._words) }));
+// {} defers execution until later
+$block('{', '}', stackFunction(1, function(code) { $exec('_push', codeBlock(code, true), mem._words) }));
