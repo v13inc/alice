@@ -232,14 +232,8 @@ var wordBlock = A.wordBlock = function(startWord, endWord, block) {
 // Parser and Executor
 //
 
-wordPrefix('parse_token', stackFunction(function(code, valueWord, parseWordMatches) {
-  // stop recursion when we have found 1 match
-  if(parseWordMatches.length == 1 || code == '') {
-    var match = parseWordMatches[0] || {word: ''};
-    if(valueWord) valueWord = valueWord.substr(0, valueWord.length - match.word.length);
-    exec(defer(valueWord), defer(match.word), defer(match.block), defer(code));
-    return;
-  }
+wordPrefix('parse_token', stackFunction(function(code, valueWord) {
+  if(code == '') return exec(defer(code), defer(valueWord), '', null);
 
   var definition = function(word) {
     var block = execPop('parse_definition', defer(word));
@@ -250,11 +244,11 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord, parseWordMatch
   var lookup = function(word) {
     if(!word) return;
 
-    var blocks = definition(word);
+    var block = definition(word);
     // if the current word has a value definition, return immediately. This lets value words
     // have parse words in them (eg. _+)
-    if(blocks.value) return;
-    if(blocks.parse) return lookupLongest(word, blocks.parse);
+    if(block.value) return;
+    if(block.parse) return lookupLongest(word, block.parse);
 
     return lookup(word.slice(1));
   }
@@ -277,17 +271,16 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord, parseWordMatch
   valueWord += code[0];
   var match = lookup(valueWord);
   if(match) {
-    parseWordMatches.push(match);
-    var code = code.slice(match.word.length);
+    valueWord = valueWord.substr(0, valueWord.length - match.word.length);
+    // we need the _push __ so that exec doesn't split up our code, since it's the first argument
+    exec('_push __', defer(code.slice(match.word.length)), defer(valueWord), defer(match.word), defer(match.block));
   } else {
-    var code = code.slice(1);
+    exec('parse_token', defer(code.slice(1)), defer(valueWord));
   }
-
-  exec('parse_token', defer(code), defer(valueWord), parseWordMatches);
 }));
 
 wordPrefix('token', stackFunction(function(code) {
-  exec('parse_token', defer(code), '', []);
+  exec('parse_token', defer(code), '');
 }));
 
 wordPrefix('parse', stackFunction(function(code) {
@@ -295,7 +288,7 @@ wordPrefix('parse', stackFunction(function(code) {
 
   // grab the next set of value and parse words
   exec('token', defer(code));
-  var valueWord = execPop(), parseWord = execPop(), parseBlock = execPop(), code = execPop();
+  var code = execPop(), valueWord = execPop(), parseWord = execPop(), parseBlock = execPop();
 
   var _parse = $block()._parse;
   if(valueWord) exec('_push', _parse, defer(valueWord));
@@ -482,8 +475,8 @@ wordPrefix('()', stackFunction(function(code) {
 }));
 
 // " quotes strings and stops them from being parsed.
-wordBlock('"', '"', stackFunction(function(code) { console.log('"!');exec('_push __p', defer(code)) }));
-wordBlock('"""', '"""', stackFunction(function(code) { console.log('"""!!!');exec('_push __p', defer(code)) }));
+wordBlock('"', '"', stackFunction(function(code) { exec('_push __p', defer(code)) }));
+wordBlock('"""', '"""', stackFunction(function(code) { exec('_push __p', defer(code)) }));
 // () executes immediately
 wordBlock('(', ')', stackFunction(function(code) { exec('_push __p ()', defer(code)) }));
 // {} defers execution until later
@@ -494,4 +487,4 @@ wordBlock('{', '}', stackFunction(function(code) {
 // create the root-level block
 $block();
 
-e = A.eval = function(code) { exec('eval', code); }
+e = A.eval = function(code) { exec('eval', defer(code)); }

@@ -3,14 +3,14 @@ describe('parser', function() {
     it('should split code into a value word, a parse word, and the remaining code', aliceBlock(function(blockMem) {
 
       Alice.exec('token', 'one+two');
-      var valueWord = p(), parseWord = p(), parseBlock = p(), code = p();
+      var code = p(), valueWord = p(), parseWord = p(), parseBlock = p();
       expect.equal(code, 'two');
       expect.equal(valueWord, 'one');
       expect.equal(parseWord, '+');
       expect.equal(typeof parseBlock, 'function');
 
       Alice.exec('token', 'one two three');
-      var valueWord = p(), parseWord = p(), parseBlock = p(), code = p();
+      var code = p(), valueWord = p(), parseWord = p(), parseBlock = p();
       expect.equal(code, 'two three');
       expect.equal(valueWord, 'one');
       expect.equal(parseWord, ' ');
@@ -75,6 +75,12 @@ describe('eval', function() {
     Alice.eval('41 + 1');
     expect.equal(blockMem._value.toString(), '42');
   }));
+
+  it('should be able to defer execution with a \'', aliceBlock(function(blockMem) {
+    Alice.eval('world = 42');
+    Alice.eval("'world");
+    expect.equal(blockMem._value.toString(), 'world');
+  }));
 });
 
 describe('base meta-library', function() {
@@ -120,8 +126,8 @@ describe('base meta-library', function() {
 
   describe('string blocks', function() {
     var stringA = 'the question is...';
-    var stringB = 'this might be a bit cliche...\n...\n42';
-    var stringC = 'booooo\nyyyyy\naaaaa!';
+    var stringB = 'this (might) be a bit cliche...\n...\n42';
+    var stringC = 'bo""oooo\ny"yy"yy\naa\'aa""a!';
 
     it('should be able to quote strings with ""', aliceBlock(function(blockMem) {
       Alice.eval('"' + stringA + '"');
@@ -137,6 +143,20 @@ describe('base meta-library', function() {
       Alice.eval('"""' + stringC + '"""');
       expect.equal(Alice.execPop(), stringC);
       expect.equal(blockMem._value.length, 0);
+    }));
+  });
+
+  describe('execute words', function() {
+    it('should be able to execute deferred blocks with !', aliceBlock(function(blockMem) {
+      Alice.eval('world = 42');
+      Alice.eval("! 'world");
+      expect.equal(blockMem._value.toString(), '42');
+    }));
+
+    it('should execute and keep blocks on the stack with !!', aliceBlock(function(blockMem) {
+      Alice.eval('world = 42');
+      Alice.eval("!! 'world");
+      expect.equal(blockMem._value.length, 2);
     }));
   });
 });
