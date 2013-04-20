@@ -11,19 +11,20 @@ cli.parse({
 
 
 var startRepl = function() {
+  var blockMem = Alice.$block(true);
   repl.start({
     prompt: '> ',
     eval: function(cmd, context, filename, callback) {
       var cmd = cmd.substr(0, cmd.length - 1).substr(1).trim(); // for some reason cmd has an added ( at the start and ) at end?!?
-      alice.execute(cmd);
-      console.log('__: ' + alice.mem._values.join(' '));
+      alice.eval(cmd);
+      console.log('__: ' + blockMem._value.join(' '));
       callback();
     }
   });
 }
 
 var execData = function(data) {
-  alice.execute(data);
+  alice.eval(data);
 }
 
 cli.main(function(args, options) {

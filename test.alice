@@ -1,3 +1,2 @@
 t = {print "hello world"}
-t
-!! !! !! !! !! !! 't
+!! !! 't
