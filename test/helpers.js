@@ -1,5 +1,4 @@
-exec = Alice.exec;
-p = Alice.execPop;
+p = Alice.pop;
 
 aliceBlock = function(callback) {
   var thisRef = this;

@@ -1,34 +1,75 @@
 var exports = exports || {};
-var A = Alice = exports.Alice = {};
+var Alice = exports.Alice = {};
+var A = Alice; // I'm lazy!
 
 //
 // Misc helpers
 //
 
-var each = function(list, callback) {
-  for(var i in list) callback(list[i], i);
+var keys = A.keys = function(obj) {
+  var _keys = [];
+  for(var key in obj) if(obj.hasOwnProperty(key)) _keys.push(key);
+  return _keys;
 }
 
-var map = function(list, callback) {
-  var vals = [];
-  each(list, function(l) { vals.push(callback(l)) });
-  return vals;
+var each = A.each = function(list, callback, reverse) {
+  // let's shoehorn some map functionality in here too
+  var newList = [];
+  // recursively pop values off the bottom of the list (to simulate old-school loop order)
+  var _each = function(_keys) {
+    if(_keys.length <= 0) return;
+
+    var key = reverse ? _keys.slice(-1)[0] : _keys[0];
+    newList.push(callback(list[key], key));
+
+    _each(reverse ? _keys.slice(0, -1) : _keys.slice(1));
+  }
+  _each(keys(list));
+  
+  return newList;
 }
 
-var repeat = function(num, callback) {
-  for(var i = 0; i < num; i++) callback(num);
+// returns a list of numbers ranging from start to end, or 0 to start, if end isn't passed
+var range = A.range = function(start, end) {
+  var rangeList = [];
+  var _range = function(start, end) {
+    if(start >= end) return;
+    rangeList.push(start);
+    _range(start + 1, end);
+  }
+  _range(end ? start : 0, end ? end : start);
+
+  return rangeList;
 }
 
-var log_lists = function(lists, prefix) {
-  var prefix = prefix ? prefix + ': ' : '';
-  var logStrs = map(lists, function(list) {
-    return list.join(', ');
-  });
-  console.log(prefix + logStrs.join(' | '));
+var log_lists = function(lists) {
+  var logStrs = each(lists, function(list) { return list.join(', '); });
+  console.log(logStrs.join(' | '));
 }
 
-var print_words_and_values = pw =function(prefix) {
-  log_lists([$block()._parse, $block()._value], prefix);
+var print_words_and_values = function() {
+  log_lists([$block()._parse, $block()._value]);
+}
+pw = print_words_and_values; // this totally comes in handy
+
+//
+// Type convertors
+//
+
+// grumble, grumble, arguments....
+var toArray = function(list) {
+  return Array.prototype.slice.call(list, 0);
+}
+
+var toBlock = function(block) {
+  if(typeof block == 'function') return block; // already a block
+
+  // TODO: get that fancy block thing working ;)
+  // if the block isn't an array, wrap it so we can 'apply' it to the execLevel function
+  // this lets you do this: toBlock(['_push', myFancyArray, myDancyValue])
+  return function() { 
+    run(block);
+  };
 }
 
 //
@@ -43,16 +84,12 @@ var print_words_and_values = pw =function(prefix) {
 
 var stackFunction = A.stackFunction = function(callback) {
   return function() {
+    var block = $block();
     var args = [];
-    // callback.length holds the number of arguments in callback, neat!
-    repeat(callback.length, function() { args.push($block()._value.pop()); });
+    each(range(callback.length), function() { args.push(block._value.pop()); });
 
     callback.apply(this, args);
   }
-}
-
-var codeBlock = A.codeBlock = function(code) {
-  exec('eval', defer(code));
 }
 
 //
@@ -68,22 +105,120 @@ var mem = A.mem = {
 
 // this helper returns a reference to the current block memory, and allocates memory if needed
 var $block = A.$block = function(allocate) {
-  if(allocate || mem._block.length == 0) {
-    var wordBlock = {
+  if(allocate || mem._block.length == 0){
+    mem._block.push({
       _value: [],
       _parse: [],
       $parse: {},
       $value: {},
-    }
-    mem._block.push(wordBlock);
+    });
   }
   // return the block memory at the top of the _block stack
   return mem._block.slice(-1)[0];
 }
 
 var $blockEnd = A.$blockEnd = function() {
-  return mem._block.pop();
+  // pop off the top block, and push it's _value stack onto it's parent's _value stack
+  var block = mem._block.pop();
+  var parentBlock = mem._block.slice(-1)[0];
+  parentBlock._value.push(block._value);
+
+  return block;
 }
+
+//
+// Execution levels
+//  push => call => run => eval
+//  push: pushes arguments onto the stack
+//  call: pushes arguments and executes words and blocks
+//   - deferCall: this is a helper that defers all but the first argument
+//  run: splits arguments into words, then pushes and calls 'em
+//  eval: evaluate code using the fully boostrapped parser and executor
+//
+
+var push = A.push = function() {
+  var _value = $block()._value;
+  each(arguments, function(arg) { _value.push(arg) }, true); // reverse each
+}
+
+var pop = A.pop =function() {
+  return $block()._value.pop();
+}
+
+var callWord = A.callWord = function(word) {
+  var block = typeof word == 'function' ? word : mem.$value[word];
+
+  // there is a terrible javascript WAT?!? where you can look up a key with an array of that key
+  // so we must check to see if the word is an array-like object
+  //  eg. myDict = {one: 1}; myDict['one'] == myDict[['one']];
+  if(block && !isDeferred(block) && typeof word != 'object') {
+    block();
+  } else {
+    $block()._value.push(undefer(word));
+  }
+}
+
+// push words onto the stack like "push", except call any blocks or built-in words
+var call = A.call = function() {
+  each(arguments, function(word) { callWord(word) }, true); // reverse
+}
+
+// like call, except it defers all but the first argument
+var deferCall = A.deferCall = function() {
+  var args = each(arguments, function(arg, i) { return i == 0 ? arg : defer(arg); });
+  call.apply(this, args);
+}
+
+// like call, except it will split up any strings into a flat arguments array
+var run = A.run = function() {
+  // split up any strings in the arguments and concat them into a flat array
+  var args = [];
+  each(arguments, function(arg) {
+    if(arg && arg.split) arg = arg.split(' ');
+    args = args.concat(arg);
+  });
+  
+  call.apply(this, args);
+}
+
+var evaluate = A.eval = function(code) { deferCall('eval', code); }
+e = evaluate; // let's pollute the globals just a bit more for convenience
+
+// 
+// Defer functions
+//
+// These functions are used to work with deferred words and blocks. If a deferred word or block
+// is found by the executor, it will be undeferred instead of executed. If a word or block is
+// deferred multiple times, it will have to be undeferred multiple times before it will be executed.
+//
+
+var defer = A.defer = function(obj) {
+  var quotable = {string: '', number: ''};
+  var deferrable = {'function': '', object: ''};
+  // keep a count of how many times a function has been deferred
+  if(typeof obj in deferrable) obj.defer = obj.defer ? obj.defer + 1 : 1;
+  else if(typeof obj in quotable) obj = "'" + obj;
+
+  return obj
+}
+
+var undefer = A.undefer = function(obj) {
+  if(isDeferred(obj)) {
+    var deferrable = {'function': '', object: ''};
+    if(typeof obj in deferrable && obj.defer > 0) obj.defer--;
+    else obj = obj.substr(1);
+  }
+
+  return obj
+}
+
+var isDeferred = A.isDeferred = function(obj) {
+  if(!obj) return false;
+
+  // use !! to cast to a boolean
+  return !!(obj.defer || (obj.indexOf && obj.indexOf("'") == 0));
+}
+
 
 //
 // Word helpers
@@ -97,114 +232,64 @@ var $blockEnd = A.$blockEnd = function() {
 //  + 2 2 ` reordered prefix line after parse phase
 //
 
-// helper to call built-in lib words. To avoid chicken-and-egg problems, it calls the manipulates the 
-// _values stack and calls the word block directly. Consequently, this helper only works with value words.
-// This helper actually implements it's own (very) dumb parser.
-var exec = A.exec = function() {
-  var _exec = function(words) {
-    if(words.length == 0) return;
-
-    var word = words.pop();
-    // execute the word, or push it on the stack if it's not in the dict
-    if(mem.$value[word] && typeof word != 'object'){
-      mem.$value[word]();
-    } else {
-      $block()._value.push(undefer(word));
-    }
-    _exec(words);
-  }
-
-  // copy over the arguments into a words array, splitting up any strings by spaces 
-  var words = [];
-  if(arguments.length > 0) {
-    var arg = Array.prototype.shift.apply(arguments);
-    if(typeof arg == 'string') arg = arg.split(' ');
-    else arg = [arg];
-
-    each(arg, function(arg) { words.push(arg) });
-    each(arguments, function(arg) { words.push(arg) });
-  }
-
-  // recursively pop off words and execute them, or push them onto the _value stack
-  _exec(words);
-}
-
-// run exec and pop a value of the _values stack
-var execPop = A.execPop = function() {
-  exec.apply(this, arguments);
-  return $block()._value.pop();
-}
-
-var defer = A.defer = function(obj) {
-  var quotable = {string: '', number: ''};
-  // keep a count of how many times a function has been deferred
-  if(typeof obj == 'function') obj.defer = obj.defer ? obj.defer + 1 : 1;
-  else if(obj && typeof obj in quotable) obj = "'" + obj;
-
-  return obj
-}
-
-var undefer = A.undefer = function(obj) {
-  if(isDeferred(obj)) {
-    if(typeof obj == 'function' && obj.defer > 0) obj.defer--;
-    else obj = obj.substr(1);
-  }
-
-  return obj
-}
-
-var isDeferred = A.isDeferred = function(obj) {
-  return (typeof obj == 'function' && obj.defer) || (obj && obj.indexOf && obj.indexOf("'") == 0);
-}
-
 // Helper to create infix words (a MYWORD b)
-var wordInfix = A.wordInfix = function(word, block, extraParseBlock) {
+var wordInfix = A.wordInfix = function(word, numLeftWords, block, extraParseBlock) {
+  // if numLeftWords isn't passed, use 1
+  if(typeof numLeftWords != 'number') {
+    var extraParseBlock = block, block = numLeftWords, numLeftWords = 1;
+  }
+
   var valueWord = '_' + word;
   // create a parse block to flip arguments
-  var parseBlock = function() {
-    var _parse = $block()._parse;
-    exec('_push', _parse, defer(valueWord)); // push on the prefixed word to be called in the execute phase
-    exec('_swap', _parse); // swap the first arg and the word to convert to prefix notation
+  var parseBlock = stackFunction(function(code) {
+    // insert the value word after the top numLeftWords on the _parse stack
+    run('_insert __p', -numLeftWords, defer(valueWord));
 
-    if(extraParseBlock) extraParseBlock();
-  }
+    push(code);
+    if(extraParseBlock) call(toBlock(extraParseBlock));
+  })
 
-  mem.$value[valueWord] = block;
+  mem.$value[valueWord] = toBlock(block);
   mem.$parse[word] = parseBlock;
 }
 
 // Helper to create prefix words (MYWORD a b)
 var wordPrefix = A.wordPrefix = function(word, block, extraParseBlock) {
-  mem.$value[word] = block;
-  if(extraParseBlock) mem.$parse[word] = extraParseBlock;
+  mem.$value[word] = toBlock(block);
+  if(extraParseBlock) mem.$parse[word] = toBlock(extraParseBlock);
 }
 
 // Helper to create postfix words (a b MYWORD)
-var wordPostfix = A.wordPostfix = function(word, block, extraParseBlock) {
+var wordPostfix = A.wordPostfix = function(word, numLeftWords, block, extraParseBlock) {
+  // if numLeftWords isn't passed, use 1
+  if(typeof numLeftWords != 'number') {
+    var extraParseBlock = block, block = numLeftWords, numLeftWords = 1;
+  }
+
   var valueWord = '_' + word;
   var parseBlock = stackFunction(function(code) {
     // insert the value word after the top 2 words on the _parse stack
-    exec('_insert', valueWord, -3, $block()._parse);
+    run('_insert __p', -numLeftWords, defer(valueWord));
 
-    exec('_push __', code);
-
-    if(extraParseBlock) extraParseBlock();
+    push(code);
+    if(extraParseBlock) call(toBlock(extraParseBlock));
   });
 
-  mem.$value[valueWord] = block;
+  mem.$value[valueWord] = toBlock(block);
   mem.$parse[word] = parseBlock;
 }
 
 // Helper to create parse words. Similar to wordPrefix, but without a value block by default
 var wordParse = A.wordParse = function(word, block, extraValueBlock) {
-  if(extraValueBlock) mem.$value[word] = extraValueBlock;
-  mem.$parse[word] = block;
+  if(extraValueBlock) mem.$value[word] = toBlock(extraValueBlock);
+  mem.$parse[word] = toBlock(block);
 }
 
 // helper to create parse functions that build blocks
-var wordBlock = A.wordBlock = function(startWord, endWord, block) {
+var wordBlock = A.wordBlock = function(startWord, endWord, block, noAllocate) {
   var bracketToken = function(code, startWord, endWord, count) {
     var count = count || 0, token = '', character;
+    // TODO: Recursion, baby
     do {
       token += code[token.length];
       var matchesStart = token.substr(-startWord.length) == startWord;
@@ -220,11 +305,10 @@ var wordBlock = A.wordBlock = function(startWord, endWord, block) {
   wordParse(startWord, stackFunction(function(line) {
     // grab all the words until we hit the block end word
     var code = bracketToken(line, startWord, endWord, 1);
-    exec('_push __', code);
-    block();
+    call(toBlock(block), code);
 
     line = line.substring(code.length + endWord.length); // strip the block from the remaining line
-    exec('_push __', line);
+    push(line);
   }));
 }
 
@@ -233,11 +317,12 @@ var wordBlock = A.wordBlock = function(startWord, endWord, block) {
 //
 
 wordPrefix('parse_token', stackFunction(function(code, valueWord) {
-  if(code == '') return exec(defer(code), defer(valueWord), '', null);
+  if(code == '') return push(code, valueWord, '', null);
 
   var definition = function(word) {
-    var block = execPop('parse_definition', defer(word));
-    var valueBlock = execPop('value_definition', defer(word));
+    var block = pop(deferCall('definition', '$parse', word));
+    // we can't use run, in case word is a space
+    var valueBlock = pop(deferCall('definition', '$value', word));
     return { value: valueBlock == word ? null : valueBlock, parse: block == word ? null : block };
   }
 
@@ -255,7 +340,7 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord) {
 
   // once we have found a matching parse word, we do another search for longer matching parse words
   var lookupLongest = function(word, block) {
-    var similiarWords = execPop('parse_definition_search', word);
+    var similiarWords = pop(deferCall('definition_search', '$parse', word));
     // look for the longest parse word that matches up with the code
     var longestMatch = { word: word, block: block };
     each(similiarWords, function(simWord) {
@@ -272,219 +357,151 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord) {
   var match = lookup(valueWord);
   if(match) {
     valueWord = valueWord.substr(0, valueWord.length - match.word.length);
-    // we need the _push __ so that exec doesn't split up our code, since it's the first argument
-    exec('_push __', defer(code.slice(match.word.length)), defer(valueWord), defer(match.word), defer(match.block));
+    push(code.slice(match.word.length), valueWord, match.word, match.block);
   } else {
-    exec('parse_token', defer(code.slice(1)), defer(valueWord));
+    deferCall('parse_token', code.slice(1), valueWord);
   }
 }));
 
-wordPrefix('token', stackFunction(function(code) {
-  exec('parse_token', defer(code), '');
-}));
+wordPrefix('token', stackFunction(function(code) { deferCall('parse_token', code, ''); }));
 
 wordPrefix('parse', stackFunction(function(code) {
   if(!code) return;
 
   // grab the next set of value and parse words
-  exec('token', defer(code));
-  var code = execPop(), valueWord = execPop(), parseWord = execPop(), parseBlock = execPop();
+  deferCall('token', code);
+  var code = pop(), valueWord = pop(), parseWord = pop(), parseBlock = pop();
 
-  var _parse = $block()._parse;
-  if(valueWord) exec('_push', _parse, defer(valueWord));
+  // push the valueWord onto _parse
+  if(valueWord) run('_push __p', defer(valueWord));
+  // call the parse block, if available
+  if(parseBlock) code = pop(call(parseBlock, code));
 
-  if(parseBlock) {
-    exec('_push __', defer(code));
-    parseBlock();
-    code = execPop()
-  }
-
-  exec('parse', defer(code));
+  deferCall('parse', code);
 }));
 
 wordPrefix('execute', function() {
-  if(execPop('_len __p') <= 0) return;
+  if(pop(run('_len __p')) <= 0) return;
 
-  // pop off the top _parse word, look it up and try and execute it
-  var block = execPop('value_definition _pop __p');
-  if(typeof block == 'function' && !isDeferred(block)) {
-    block();
-  } else {
-    exec('_push __', block);
-  }
-
-  exec('execute');
+  run('execute ! _pop __p');
 });
 
-wordPrefix('eval', function() {
-  exec('execute parse');
-});
+wordPrefix('eval', 'execute parse');
 
-// 
-// Native words
-//
-
-// void word separators
-wordParse(' ', function() {});
-wordParse('\t', function() {});
-wordParse('\r', function() {});
-
-// execute on newlines
-wordParse('\n', stackFunction(function(code) { exec(defer(code), 'execute') }));
-
-// List Functions
-wordPrefix('_', function() {
-  exec('_push __', []);
-});
-
-wordInfix('len', stackFunction(function(list) {
-  exec('_push __', list.length);
-}));
-
-wordInfix('push', stackFunction(function(list, item) {
-  list.push(item);
-}));
-
-wordInfix('pop', stackFunction(function(list) {
-  exec('_push __', defer(list.pop()));
-}));
-
-wordInfix('drop', stackFunction(function(list) {
-  list.pop();
-}));
-
-wordInfix('insert', stackFunction(function(list, index, item) {
-  if(index < 0) index = list.length + index;
-  list.splice(index - 1, 0, item);
-}));
-
-wordInfix('set', stackFunction(function(list, index, item) {
-  if(index < 0) index = list.length + index;
-  list[index - 1] = item;
-}));
-
-wordInfix(':', stackFunction(function(list, index) {
-  exec('_push __', defer(list[index - 1]));
-}));
-
-wordInfix('swap', stackFunction(function(list) {
-  var a = execPop('_pop', list);
-  var b = execPop('_pop', list);
-  exec('_push', list, defer(a));
-  exec('_push', list, defer(b));
-}));
-
-wordInfix('dup', stackFunction(function(list) {
-  list.push(list.slice(-1)[0]);
-}));
-
-// Functions to manipulate block stacks and dictionaries
-wordPrefix('__', function() {
-  // push a reference to the current _value stack onto _values (meta!)
-  // NOTE: _push relies on this word, so we have to push manually (poor DRY)
-  $block()._value.push($block()._value);
-});
-
-wordPrefix('__p', function() {
-  exec('_push __', $block()._parse);
-});
-
-wordPrefix('parse_definition', stackFunction(function(word) {
+// helper words to look up definitions. Type is one of $parse or $value
+wordPrefix('definition', stackFunction(function(type, word) {
   var block;
-  each(mem._block, function(blockMem) {
-    block = blockMem.$parse[word];
-  });
-  exec('_push __', block || mem.$parse[word] || defer(word));
+  // concat mem to the beginning of _block so we search mem first
+  each([mem].concat(mem._block), function(blockMem) { block = blockMem[type][word] || block });
+  push(block || word);
 }));
 
-wordPrefix('value_definition', stackFunction(function(word) {
-  var block;
-  each(mem._block, function(blockMem) {
-    block = blockMem.$value[word];
-  });
-  exec('_push __', block || mem.$value[word] || defer(word));
-}));
-
-// find all parse words that start with <search> (eg. parse_definition_search " => [", """])
-wordPrefix('parse_definition_search', stackFunction(function(search) {
+// find all parse words that start with <search> (eg. definition_search " => [", """])
+wordPrefix('definition_search', stackFunction(function(type, search) {
   var matches = [];
-  each(mem._block.concat(mem), function(blockMem) {
-    each(blockMem.$parse, function(block, word) {
+  each([mem].concat(mem._block), function(blockMem) {
+    each(blockMem[type], function(block, word) {
       if(word.indexOf(search) == 0) matches.push(word);
     });
   });
-  exec('_push __', matches);
+  push(matches);
 }));
+
+
+// 
+// Syntax words
+//
+
+// no-op word
+wordPrefix('pass', function() {});
+
+// Functions to manipulate block stacks and dictionaries
+wordPrefix('__', function() { push($block()._value) });
+wordPrefix('__p', function() { push($block()._parse) });
+wordPrefix('__b', function() { push(mem._block) });
 
 // = adds a word to $value
 wordInfix('=', stackFunction(function(word, block) {
   $block().$value[word] = block;
 }), function() {
-  var _parse = $block()._parse;
-  // add a ' to the first argument, so we can overwrite existing words
-  var a = execPop('_pop', _parse);
-  exec('_push', _parse, defer("'" + a));
+  // defer the first argument so we can overwrite existing words
+  var a = pop(run('_pop __p'));
+  run('_push __p', defer(defer(a)));
 });
-
-// Math functions
-wordInfix('+', stackFunction(function(a, b) {
-  exec('_push __', Number(a) + Number(b)); 
-}));
-
-wordInfix('-', stackFunction(function(a, b) {
-  exec('_push __', Number(a) - Number(b)); 
-}));
-
-wordInfix('*', stackFunction(function(a, b) {
-  exec('_push __', Number(a) * Number(b)); 
-}));
-
-wordInfix('/', stackFunction(function(a, b) {
-  exec('_push __', Number(a) / Number(b)); 
-}));
-
-wordInfix('%', stackFunction(function(a, b) {
-  exec('_push __', Number(a) % Number(b)); 
-}));
-
-wordPrefix('print', stackFunction(function(item) {
-  console.log(item);
-}));
 
 // ! executes the block on the top of the _values stack
 wordPrefix('!', stackFunction(function(word) {
-  var block = execPop('value_definition', defer(word));
-  if(typeof block == 'function') block();
-  else exec('_push __', defer(block));
+  call(pop(deferCall('definition', '$value', word)));
 }));
 
-wordPrefix('!!', stackFunction(function() {
-  exec('! _dup __');
+// !p executes the parse block for word
+wordPrefix('!p', stackFunction(function(word) {
+  call(pop(deferCall('definition', '$parse', word)));
+}));
+
+wordPrefix('!!', '! _dup __');
+
+// code block factories
+wordPrefix('()', stackFunction(function(code) {
+  push(function() { $block(true); deferCall('eval', code); $blockEnd() });
 }));
 
 wordPrefix('{}', stackFunction(function(code) {
-  exec('_push __', defer(defer(function() {
-    exec('eval', defer(code));
-  })));
-}));
-
-wordPrefix('()', stackFunction(function(code) {
-  exec('_push __', defer(function() {
-    exec('eval', defer(code));
-  }));
+  // call the regular block factory, and defer it's output
+  push(defer(pop(call('()', code))));
 }));
 
 // " quotes strings and stops them from being parsed.
-wordBlock('"', '"', stackFunction(function(code) { exec('_push __p', defer(code)) }));
-wordBlock('"""', '"""', stackFunction(function(code) { exec('_push __p', defer(code)) }));
+wordBlock('"', '"', '_push __p');
+wordBlock('"""', '"""', '_push __p');
 // () executes immediately
-wordBlock('(', ')', stackFunction(function(code) { exec('_push __p ()', defer(code)) }));
+wordBlock('(', ')', '_push __p ()');
 // {} defers execution until later
-wordBlock('{', '}', stackFunction(function(code) { 
-  exec('_push __p {}', defer(code)) 
+wordBlock('{', '}', '_push __p {}');
+
+// void word separators
+wordParse(' ', 'pass');
+wordParse('\t', 'pass');
+wordParse('\r', 'pass');
+
+// execute on newlines
+wordParse('\n', stackFunction(function(code) { call(defer(code), 'execute') }));
+
+// 
+// List words
+//
+
+wordPrefix('_', function() { push([]) });
+wordInfix('len', stackFunction(function(list) { push(list.length) }));
+wordInfix('push', stackFunction(function(list, item) { list.push(item) }));
+wordInfix('pop', stackFunction(function(list) { push(list.pop()) }));
+wordInfix('drop', stackFunction(function(list) { list.pop() }));
+wordInfix('insert', stackFunction(function(list, index, item) {
+  if(index <= 0) index = list.length + index + 1; // support negative indexing
+  list.splice(index - 1, 0, item);
 }));
+wordInfix('set', stackFunction(function(list, index, item) {
+  if(index < 0) index = list.length + index + 1; // support negative indexing
+  list[index - 1] = item;
+}));
+wordInfix('get', stackFunction(function(list, index) { 
+  if(index < 0) index = list.length + index + 1; // support negative indexing
+  push(list[index - 1]);
+}));
+wordInfix('swap', stackFunction(function(list) { run('_insert', list, -1, '_pop', list) }));
+wordInfix('dup', stackFunction(function(list) { list.push(list.slice(-1)[0]) }));
+
+// 
+// Math words
+//
+
+wordInfix('+', stackFunction(function(a, b) { push(Number(a) + Number(b)); }));
+wordInfix('-', stackFunction(function(a, b) { push(Number(a) - Number(b)); }));
+wordInfix('*', stackFunction(function(a, b) { push(Number(a) * Number(b)); }));
+wordInfix('/', stackFunction(function(a, b) { push(Number(a) / Number(b)); }));
+wordInfix('%', stackFunction(function(a, b) { push(Number(a) % Number(b)); }));
+wordPrefix('print', stackFunction(function(item) { console.log(item); }));
+
 
 // create the root-level block
 $block();
-
-e = A.eval = function(code) { exec('eval', defer(code)); }
