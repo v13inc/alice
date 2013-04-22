@@ -200,6 +200,13 @@ describe('base meta-library', function() {
       Alice.eval('myVar');
       expect.equal(Number(Alice.pop()), 42);
     }));
+    it('should be able to pull values off the stack and assign them with a vairable block', aliceBlock(function(blockMem) {
+      Alice.eval('one 2 "three four" 5*20; [a b c d]');
+      aliceWordEqual('a', 'one');
+      aliceWordEqual('b', '2');
+      aliceWordEqual('c', 'three four');
+      aliceWordEqual('d', '100');
+    }));
   });
 
   describe('string blocks', function() {
@@ -222,6 +229,10 @@ describe('base meta-library', function() {
       expect.equal(Alice.pop(), stringC);
       expect.equal(blockMem._value.length, 0);
     }));
+    it('should be able to concatenate strings with ..', aliceBlock(function(blockMem) {
+      Alice.eval('"one".."two" .."three four".. "five\nsix!" .. "!" ..thisWordDoesntExist..""');
+      expect.equal(Alice.pop(), 'onetwothree fourfive\nsix!!thisWordDoesntExist');
+    }));
   });
 
   describe('execute words', function() {
@@ -236,5 +247,105 @@ describe('base meta-library', function() {
       Alice.eval("!! 'world");
       expect.equal(blockMem._value.length, 2);
     }));
+  });
+
+  describe('booleans and branching', function() {
+    it('should be able to use the "false" word', aliceBlock(function(blockMem) {
+      Alice.eval('false');
+      expect.equal(Alice.pop(), false);
+    }));
+
+    it('should be able to use the "if" word', aliceBlock(function(blockMem) {
+      Alice.eval('if true {"true value"}');
+      expect.equal(Alice.pop(), "true value");
+      $block(true);
+      Alice.eval('if false {"true value"}');
+      expect.equal(Alice.pop(), false);
+      expect.equal(Alice.pop(), undefined);
+      $blockEnd();
+    }));
+
+    it('should be able to use the onlyIf word', aliceBlock(function(blockMem) {
+      Alice.eval('{"true value"} onlyIf true');
+      expect.equal(Alice.pop(), "true value");
+      $block(true);
+        Alice.eval('{"true value"} onlyIf false');
+        expect.equal(Alice.pop(), false);
+        expect.equal(Alice.pop(), undefined);
+      $blockEnd();
+    }));
+  });
+
+  describe('looping', function() {
+    var testList = [], mappedList = [], returnedList = [];
+    var list = [1,2,3,4];
+    var block = Alice.stackFunction(function(val) {
+      testList.push(val);
+      Alice.push(val);
+    });
+    var mapBlock = Alice.stackFunction(function(val) {
+      testList.push(val);
+      Alice.push(Number(val) * 2);
+    });
+
+    var check = function(a, b) {
+      var a = a || '4,3,2,1';
+      var b = b === undefined ? a : b;
+      expect.equal(list.toString(), '1,2,3,4');
+      expect.equal(testList.toString(), a);
+      expect.equal(mappedList.toString(), b);
+      expect.equal(returnedList.toString(), b)
+    }
+    var reset = function(blockMem) {
+      testList = [], mappedList = [], returnedList = [];
+      blockMem.$value.list = list;
+      blockMem.$value.testList = testList;
+    }
+
+    describe('loop word', function() {
+      it('should be able to loop backwards and forwards over a list', aliceBlock(function(blockMem) {
+        reset(blockMem);
+        Alice.deferCall('loop', list, block, 1, mappedList, false);
+        returnedList = Alice.pop();
+        check();
+
+        reset(blockMem);
+        Alice.deferCall('loop', list, block, 1, mappedList, true);
+        returnedList = Alice.pop();
+        check('1,2,3,4');
+      }));
+
+      it('should be able to map values onto a new list', aliceBlock(function(blockMem) {
+        reset(blockMem);
+        Alice.deferCall('loop', list, mapBlock, 1, mappedList, false);
+        returnedList = Alice.pop();
+        check('4,3,2,1', '8,6,4,2');
+
+        reset(blockMem);
+        Alice.deferCall('loop', list, mapBlock, 1, mappedList, true);
+        returnedList = Alice.pop();
+        check('1,2,3,4', '2,4,6,8');
+      }));
+    });
+
+    describe('friendly loop words', function() {
+      it('"each" should be able to loop backwards and forwards over a list', aliceBlock(function(blockMem) {
+        reset(blockMem);
+        Alice.eval('list each { testList push __ dup }');
+        check('4,3,2,1', '');
+      }));
+
+      it('"foreach" should be able to loop backwards and forwards over a list', aliceBlock(function(blockMem) {
+        reset(blockMem);
+        Alice.eval('list foreach { testList push __ dup }');
+        check('1,2,3,4', '');
+      }));
+
+      it('"times" should be able to repeat a block N times', aliceBlock(function(blockMem) {
+        reset(blockMem);
+        Alice.eval('4 times { testList push __ dup }');
+        check('1,2,3,4', '');
+      }));
+    });
   });
 });

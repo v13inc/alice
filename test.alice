@@ -1,2 +1,4 @@
-t = {print "hello world"}
-!! !! 't
+print_geekiness = {[name geek_level evidence]
+  print name .. " is a (" .. geek_level .. ") geek! He even " .. evidence .. "!!"
+}
+print_geekiness Sean ginormous "wrote a programming language"

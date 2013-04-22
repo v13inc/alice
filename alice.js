@@ -31,7 +31,7 @@ var each = A.each = function(list, callback, reverse) {
 
 // returns a list of numbers ranging from start to end, or 0 to start, if end isn't passed
 var range = A.range = function(start, end) {
-  var rangeList = [];
+  var rangeList = [], start = Number(start), end = Number(end);
   var _range = function(start, end) {
     if(start >= end) return;
     rangeList.push(start);
@@ -118,12 +118,7 @@ var $block = A.$block = function(allocate) {
 }
 
 var $blockEnd = A.$blockEnd = function() {
-  // pop off the top block, and push it's _value stack onto it's parent's _value stack
-  var block = mem._block.pop();
-  var parentBlock = mem._block.slice(-1)[0];
-  parentBlock._value.push(block._value);
-
-  return block;
+  return mem._block.pop();
 }
 
 //
@@ -174,7 +169,7 @@ var run = A.run = function() {
   // split up any strings in the arguments and concat them into a flat array
   var args = [];
   each(arguments, function(arg) {
-    if(arg && arg.split) arg = arg.split(' ');
+    arg = (arg && arg.split) ? arg.split(' ') : [arg];
     args = args.concat(arg);
   });
   
@@ -305,7 +300,7 @@ var wordBlock = A.wordBlock = function(startWord, endWord, block, noAllocate) {
   wordParse(startWord, stackFunction(function(line) {
     // grab all the words until we hit the block end word
     var code = bracketToken(line, startWord, endWord, 1);
-    call(toBlock(block), code);
+    deferCall(toBlock(block), code);
 
     line = line.substring(code.length + endWord.length); // strip the block from the remaining line
     push(line);
@@ -342,11 +337,11 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord) {
   var lookupLongest = function(word, block) {
     var similiarWords = pop(deferCall('definition_search', '$parse', word));
     // look for the longest parse word that matches up with the code
-    var longestMatch = { word: word, block: block };
+    var longestMatch = { word: word, block: block, trimExtra: 0 };
     each(similiarWords, function(simWord) {
       if(code.indexOf(simWord) == 0 && simWord.length > longestMatch.word.length) {
         var block = definition(simWord);
-        if(!block.value && block.parse) longestMatch = { word: simWord, block: block.parse };
+        if(!block.value && block.parse) longestMatch = { word: simWord, block: block.parse, trimExtra: simWord.length - word.length };
       }
     });
 
@@ -357,7 +352,7 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord) {
   var match = lookup(valueWord);
   if(match) {
     valueWord = valueWord.substr(0, valueWord.length - match.word.length);
-    push(code.slice(match.word.length), valueWord, match.word, match.block);
+    push(code.slice(1 + match.trimExtra), valueWord, match.word, match.block);
   } else {
     deferCall('parse_token', code.slice(1), valueWord);
   }
@@ -375,7 +370,7 @@ wordPrefix('parse', stackFunction(function(code) {
   // push the valueWord onto _parse
   if(valueWord) run('_push __p', defer(valueWord));
   // call the parse block, if available
-  if(parseBlock) code = pop(call(parseBlock, code));
+  if(parseBlock) code = pop(deferCall(parseBlock, code));
 
   deferCall('parse', code);
 }));
@@ -443,7 +438,7 @@ wordPrefix('!!', '! _dup __');
 
 // code block factories
 wordPrefix('()', stackFunction(function(code) {
-  push(function() { $block(true); deferCall('eval', code); $blockEnd() });
+  push(function() { deferCall('eval', code) });
 }));
 
 wordPrefix('{}', stackFunction(function(code) {
@@ -451,13 +446,24 @@ wordPrefix('{}', stackFunction(function(code) {
   push(defer(pop(call('()', code))));
 }));
 
+wordPrefix('[]', stackFunction(function(code) {
+  var words = code.split(' ');
+  each(words, function(word) { deferCall('_=', word, pop()) });
+}));
+
+wordPrefix('""', stackFunction(function(code) {
+  push(defer(code));
+}));
+
 // " quotes strings and stops them from being parsed.
-wordBlock('"', '"', '_push __p');
+wordBlock('"', '"', '_push __p ""');
 wordBlock('"""', '"""', '_push __p');
 // () executes immediately
 wordBlock('(', ')', '_push __p ()');
 // {} defers execution until later
 wordBlock('{', '}', '_push __p {}');
+// [var1, var2, ...] pops values off the stack and defines them
+wordBlock('[', ']', '_push __p []');
 
 // void word separators
 wordParse(' ', 'pass');
@@ -466,13 +472,72 @@ wordParse('\r', 'pass');
 
 // execute on newlines
 wordParse('\n', stackFunction(function(code) { call(defer(code), 'execute') }));
+wordParse(';', stackFunction(function(code) { call(defer(code), 'execute') }));
+
+// 
+// Strings
+// 
+
+wordInfix('..', stackFunction(function(left, right) { 
+  push(left.toString() + right.toString());
+}));
+// 
+// Booleans and branching
+//
+
+// any value is can be true, but only false can be false. - Steve Jobs, 1998
+wordPrefix('false', function() { push(false) });
+wordPrefix('not', stackFunction(function(val) { push(!val) }));
+wordPrefix('if', stackFunction(function(bool, block) {
+  push(bool);
+  if(bool !== false) call('!', block);
+}));
+wordInfix('onlyIf', function() { run('if _swap __') }); // infix version
+wordInfix('else', 'if not');
+
+// 
+// Looping
+//
+
+// big-ass generic loop recursor, loops backward from default (it's more stack friendly)
+wordPrefix('loop', stackFunction(function(list, block, index, newList, forward) {
+  var len = pop(deferCall('_len', list));
+  var index = Number(index);
+  if(index > len) return push(newList); // push the list on the stack so we can chain
+
+  // use a negative index if we are traversing in reverse
+  var trueIndex = forward ? index : (len - index + 1);
+  // push the list, index and value on the stack
+  deferCall('_get', list, trueIndex,   trueIndex, list);
+  deferCall('!', block);
+  // replace the list value with the one on the stack
+  var newVal = pop(); pop(); pop(); // grab the new value and discard the index and list
+  deferCall('_push', newList, newVal);
+
+  deferCall('loop', list, block, index + 1, newList, forward);
+}));
+
+// __ each {[value, index, list] pass }
+wordInfix('each', stackFunction(function(list, block) {
+  deferCall('loop', list, block, 1, [], false);
+}));
+
+wordInfix('foreach', stackFunction(function(list, block) {
+  deferCall('loop', list, block, 1, [], true);
+}));
+
+wordInfix('times', stackFunction(function(numTimes, block) {
+  deferCall('loop', range(1, Number(numTimes) + 1), block, 1, [], true);
+}));
 
 // 
 // List words
 //
 
 wordPrefix('_', function() { push([]) });
-wordInfix('len', stackFunction(function(list) { push(list.length) }));
+wordInfix('len', stackFunction(function(list) { 
+  push(list.length);
+}));
 wordInfix('push', stackFunction(function(list, item) { list.push(item) }));
 wordInfix('pop', stackFunction(function(list) { push(list.pop()) }));
 wordInfix('drop', stackFunction(function(list) { list.pop() }));
@@ -488,7 +553,7 @@ wordInfix('get', stackFunction(function(list, index) {
   if(index < 0) index = list.length + index + 1; // support negative indexing
   push(list[index - 1]);
 }));
-wordInfix('swap', stackFunction(function(list) { run('_insert', list, -1, '_pop', list) }));
+wordInfix('swap', stackFunction(function(list) { run('_insert', defer(list), -1, '_pop', defer(list)) }));
 wordInfix('dup', stackFunction(function(list) { list.push(list.slice(-1)[0]) }));
 
 // 
