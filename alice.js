@@ -29,6 +29,10 @@ var each = A.each = function(list, callback, reverse) {
   return newList;
 }
 
+var reverse = A.reverse = function(list) {
+  return each(list, function(val) { return val }, true);
+}
+
 // returns a list of numbers ranging from start to end, or 0 to start, if end isn't passed
 var range = A.range = function(start, end) {
   var rangeList = [], start = Number(start), end = Number(end);
@@ -48,7 +52,7 @@ var log_lists = function(lists) {
 }
 
 var print_words_and_values = function() {
-  log_lists([$block()._parse, $block()._value]);
+  log_lists([module()._parse, module()._value]);
 }
 pw = print_words_and_values; // this totally comes in handy
 
@@ -83,13 +87,16 @@ var toBlock = function(block) {
 //
 
 var stackFunction = A.stackFunction = function(callback) {
-  return function() {
-    var block = $block();
-    var args = [];
-    each(range(callback.length), function() { args.push(block._value.pop()); });
-
+  var _stackFunction = function() {
+    var block = module();
+    var args = each(range(callback.length), function() { return block._value.pop() });
     callback.apply(this, args);
   }
+  _stackFunction.isStackFunction = true;
+
+  if(typeof callback == 'function' && !callback.isStackFunction) return _stackFunction;
+
+  return toBlock(callback);
 }
 
 //
@@ -97,28 +104,35 @@ var stackFunction = A.stackFunction = function(callback) {
 //
 
 var mem = A.mem = {
-  _block: [],
+  _module: [],
   // built-in dictionaries
   $parse: {}, // parse words
   $value: {}, // value words
 }
 
 // this helper returns a reference to the current block memory, and allocates memory if needed
-var $block = A.$block = function(allocate) {
-  if(allocate || mem._block.length == 0){
-    mem._block.push({
+var module = A.module = function(allocate, shareValueStack) {
+  var _module = function() {
+    return {
       _value: [],
       _parse: [],
       $parse: {},
       $value: {},
-    });
+    }
   }
-  // return the block memory at the top of the _block stack
-  return mem._block.slice(-1)[0];
+
+  var first = mem._module.length == 0;
+  if(allocate || first) {
+    var mod = typeof allocate == 'object' ? allocate : _module();
+    if(shareValueStack && !first) mod._value = module()._value;
+    mem._module.push(mod);
+  }
+  // return the block memory at the top of the _module stack
+  return mem._module.slice(-1)[0];
 }
 
-var $blockEnd = A.$blockEnd = function() {
-  return mem._block.pop();
+var moduleEnd = A.moduleEnd = function() {
+  return mem._module.pop();
 }
 
 //
@@ -132,12 +146,12 @@ var $blockEnd = A.$blockEnd = function() {
 //
 
 var push = A.push = function() {
-  var _value = $block()._value;
+  var _value = module()._value;
   each(arguments, function(arg) { _value.push(arg) }, true); // reverse each
 }
 
 var pop = A.pop =function() {
-  return $block()._value.pop();
+  return module()._value.pop();
 }
 
 var callWord = A.callWord = function(word) {
@@ -149,7 +163,7 @@ var callWord = A.callWord = function(word) {
   if(block && !isDeferred(block) && typeof word != 'object') {
     block();
   } else {
-    $block()._value.push(undefer(word));
+    module()._value.push(undefer(word));
   }
 }
 
@@ -166,14 +180,22 @@ var deferCall = A.deferCall = function() {
 
 // like call, except it will split up any strings into a flat arguments array
 var run = A.run = function() {
+  if(arguments.length <= 0) return;
+
   // split up any strings in the arguments and concat them into a flat array
   var args = [];
   each(arguments, function(arg) {
-    arg = (arg && arg.split) ? arg.split(' ') : [arg];
+    arg = (arg && arg.split && !isDeferred(arg)) ? arg.split(' ') : [arg];
     args = args.concat(arg);
   });
+
+  // grab the first statement (separated by ';')
+  var statementEnd = args.indexOf(';');
+  var remainingArgs = statementEnd != -1 ? args.slice(statementEnd + 1) : [];
+  args = statementEnd != -1 ? args.slice(0, statementEnd) : args;
   
   call.apply(this, args);
+  run.apply(this, remainingArgs);
 }
 
 var evaluate = A.eval = function(code) { deferCall('eval', code); }
@@ -234,24 +256,21 @@ var wordInfix = A.wordInfix = function(word, numLeftWords, block, extraParseBloc
     var extraParseBlock = block, block = numLeftWords, numLeftWords = 1;
   }
 
-  var valueWord = '_' + word;
   // create a parse block to flip arguments
-  var parseBlock = stackFunction(function(code) {
+  var parseBlock = function(code) {
     // insert the value word after the top numLeftWords on the _parse stack
-    run('_insert __p', -numLeftWords, defer(valueWord));
+    run(defer(code), '_insert __p', -numLeftWords, defer('_' + word));
+    if(extraParseBlock) call(stackFunction(extraParseBlock));
+  }
 
-    push(code);
-    if(extraParseBlock) call(toBlock(extraParseBlock));
-  })
-
-  mem.$value[valueWord] = toBlock(block);
-  mem.$parse[word] = parseBlock;
+  mem.$value['_' + word] = stackFunction(block);
+  mem.$parse[word] = stackFunction(parseBlock);
 }
 
 // Helper to create prefix words (MYWORD a b)
 var wordPrefix = A.wordPrefix = function(word, block, extraParseBlock) {
-  mem.$value[word] = toBlock(block);
-  if(extraParseBlock) mem.$parse[word] = toBlock(extraParseBlock);
+  mem.$value[word] = stackFunction(block);
+  if(extraParseBlock) mem.$parse[word] = stackFunction(extraParseBlock);
 }
 
 // Helper to create postfix words (a b MYWORD)
@@ -261,23 +280,20 @@ var wordPostfix = A.wordPostfix = function(word, numLeftWords, block, extraParse
     var extraParseBlock = block, block = numLeftWords, numLeftWords = 1;
   }
 
-  var valueWord = '_' + word;
-  var parseBlock = stackFunction(function(code) {
+  var parseBlock = function(code) {
     // insert the value word after the top 2 words on the _parse stack
-    run('_insert __p', -numLeftWords, defer(valueWord));
+    run(defer(code), '_insert __p', -numLeftWords, defer('_' + word));
+    if(extraParseBlock) call(stackFunction(extraParseBlock));
+  }
 
-    push(code);
-    if(extraParseBlock) call(toBlock(extraParseBlock));
-  });
-
-  mem.$value[valueWord] = toBlock(block);
-  mem.$parse[word] = parseBlock;
+  mem.$value['_' + word] = stackFunction(block);
+  mem.$parse[word] = stackFunction(parseBlock);
 }
 
 // Helper to create parse words. Similar to wordPrefix, but without a value block by default
 var wordParse = A.wordParse = function(word, block, extraValueBlock) {
-  if(extraValueBlock) mem.$value[word] = toBlock(extraValueBlock);
-  mem.$parse[word] = toBlock(block);
+  if(extraValueBlock) mem.$value[word] = stackFunction(extraValueBlock);
+  mem.$parse[word] = stackFunction(block);
 }
 
 // helper to create parse functions that build blocks
@@ -300,10 +316,8 @@ var wordBlock = A.wordBlock = function(startWord, endWord, block, noAllocate) {
   wordParse(startWord, stackFunction(function(line) {
     // grab all the words until we hit the block end word
     var code = bracketToken(line, startWord, endWord, 1);
-    deferCall(toBlock(block), code);
-
-    line = line.substring(code.length + endWord.length); // strip the block from the remaining line
-    push(line);
+    deferCall(stackFunction(block), code);
+    push(line.substring(code.length + endWord.length)); // strip the block from the remaining line
   }));
 }
 
@@ -311,7 +325,7 @@ var wordBlock = A.wordBlock = function(startWord, endWord, block, noAllocate) {
 // Parser and Executor
 //
 
-wordPrefix('parse_token', stackFunction(function(code, valueWord) {
+wordPrefix('`token', function(code, valueWord) {
   if(code == '') return push(code, valueWord, '', null);
 
   var definition = function(word) {
@@ -354,13 +368,13 @@ wordPrefix('parse_token', stackFunction(function(code, valueWord) {
     valueWord = valueWord.substr(0, valueWord.length - match.word.length);
     push(code.slice(1 + match.trimExtra), valueWord, match.word, match.block);
   } else {
-    deferCall('parse_token', code.slice(1), valueWord);
+    deferCall('`token', code.slice(1), valueWord);
   }
-}));
+});
 
-wordPrefix('token', stackFunction(function(code) { deferCall('parse_token', code, ''); }));
+wordPrefix('token', function(code) { deferCall('`token', code, ''); });
 
-wordPrefix('parse', stackFunction(function(code) {
+wordPrefix('`parse', function(code) {
   if(!code) return;
 
   // grab the next set of value and parse words
@@ -372,35 +386,51 @@ wordPrefix('parse', stackFunction(function(code) {
   // call the parse block, if available
   if(parseBlock) code = pop(deferCall(parseBlock, code));
 
-  deferCall('parse', code);
-}));
+  push(code);
+});
 
+wordPrefix('parse', function(code) {
+  if(!code) return;
+
+  run('parse `parse', defer(code));
+});
+
+wordPrefix('`execute', '! _pop __p');
 wordPrefix('execute', function() {
   if(pop(run('_len __p')) <= 0) return;
-
-  run('execute ! _pop __p');
+  run('execute `execute');
 });
 
 wordPrefix('eval', 'execute parse');
 
+// these are misc helpers to ease parse word creation
+wordPrefix('execute_3_words', function() {
+  run('_pop __p _pop __p');
+  module(true, true);
+    run('_push __p _push __p');
+    run("`execute `execute `parse");
+  moduleEnd();
+  run('_push __p');
+});
+
 // helper words to look up definitions. Type is one of $parse or $value
-wordPrefix('definition', stackFunction(function(type, word) {
+wordPrefix('definition', function(type, word) {
   var block;
-  // concat mem to the beginning of _block so we search mem first
-  each([mem].concat(mem._block), function(blockMem) { block = blockMem[type][word] || block });
+  // concat mem to the beginning of _module so we search mem first
+  each([mem].concat(mem._module), function(blockMem) { block = blockMem[type][word] || block });
   push(block || word);
-}));
+});
 
 // find all parse words that start with <search> (eg. definition_search " => [", """])
-wordPrefix('definition_search', stackFunction(function(type, search) {
+wordPrefix('definition_search', function(type, search) {
   var matches = [];
-  each([mem].concat(mem._block), function(blockMem) {
+  each([mem].concat(mem._module), function(blockMem) {
     each(blockMem[type], function(block, word) {
       if(word.indexOf(search) == 0) matches.push(word);
     });
   });
   push(matches);
-}));
+});
 
 
 // 
@@ -411,59 +441,73 @@ wordPrefix('definition_search', stackFunction(function(type, search) {
 wordPrefix('pass', function() {});
 
 // Functions to manipulate block stacks and dictionaries
-wordPrefix('__', function() { push($block()._value) });
-wordPrefix('__p', function() { push($block()._parse) });
-wordPrefix('__b', function() { push(mem._block) });
+wordPrefix('__', function() { push(module()._value) });
+wordPrefix('__p', function() { push(module()._parse) });
+wordPrefix('__b', function() { push(mem._module) });
 
 // = adds a word to $value
-wordInfix('=', stackFunction(function(word, block) {
-  $block().$value[word] = block;
-}), function() {
+wordInfix('=', function(word, block) {
+  module().$value[word] = block;
+}, function() {
   // defer the first argument so we can overwrite existing words
   var a = pop(run('_pop __p'));
   run('_push __p', defer(defer(a)));
 });
 
 // ! executes the block on the top of the _values stack
-wordPrefix('!', stackFunction(function(word) {
+wordPrefix('!', function(word) {
   call(pop(deferCall('definition', '$value', word)));
-}));
+});
 
 // !p executes the parse block for word
-wordPrefix('!p', stackFunction(function(word) {
+wordPrefix('!p', function(word) {
   call(pop(deferCall('definition', '$parse', word)));
-}));
+});
 
 wordPrefix('!!', '! _dup __');
 
 // code block factories
-wordPrefix('()', stackFunction(function(code) {
+wordPrefix('()', function(code) {
   push(function() { deferCall('eval', code) });
-}));
+});
 
-wordPrefix('{}', stackFunction(function(code) {
+wordPrefix('{}', function(code) {
   // call the regular block factory, and defer it's output
   push(defer(pop(call('()', code))));
-}));
+});
 
-wordPrefix('[]', stackFunction(function(code) {
+wordPrefix('[]', function(code) {
   var words = code.split(' ');
   each(words, function(word) { deferCall('_=', word, pop()) });
-}));
+});
 
-wordPrefix('""', stackFunction(function(code) {
+wordPrefix('""', function(code) {
   push(defer(code));
-}));
+});
+wordParse("' ", function(code) { push("'" + code) });
 
 // " quotes strings and stops them from being parsed.
 wordBlock('"', '"', '_push __p ""');
 wordBlock('"""', '"""', '_push __p');
 // () executes immediately
 wordBlock('(', ')', '_push __p ()');
+wordBlock("'(", ')', '_push __p ()');
 // {} defers execution until later
 wordBlock('{', '}', '_push __p {}');
+wordBlock("'{", '}', '_push __p {}');
 // [var1, var2, ...] pops values off the stack and defines them
 wordBlock('[', ']', '_push __p []');
+
+wordPrefix('_()', function(code) {
+  // run the code inside a module, then push it's values onto a new list
+  var temp = module(true);
+    evaluate(code);
+  moduleEnd();
+
+  push(reverse(temp._value));
+});
+
+wordBlock('_(', ')', '_push __p _()');
 
 // void word separators
 wordParse(' ', 'pass');
@@ -471,27 +515,38 @@ wordParse('\t', 'pass');
 wordParse('\r', 'pass');
 
 // execute on newlines
-wordParse('\n', stackFunction(function(code) { call(defer(code), 'execute') }));
-wordParse(';', stackFunction(function(code) { call(defer(code), 'execute') }));
+wordParse('\n', function(code) { call(defer(code), 'execute') });
+wordParse(';', function(code) { call(defer(code), 'execute') });
+
+// 
+// Module word
+//
+
+wordPrefix('module', function() { module(true) });
+wordPrefix('moduleEnd', function() { push(moduleEnd()) });
+wordPrefix('use', function(mod) { module(mod, true) });
+wordPrefix('useFor', '_drop __ moduleEnd ! use'); // __: module, block
+wordInfix('.', 'useFor', 'execute_3_words');
 
 // 
 // Strings
 // 
 
-wordInfix('..', stackFunction(function(left, right) { 
+wordInfix('..', function(left, right) { 
   push(left.toString() + right.toString());
-}));
+});
+
 // 
 // Booleans and branching
 //
 
 // any value is can be true, but only false can be false. - Steve Jobs, 1998
 wordPrefix('false', function() { push(false) });
-wordPrefix('not', stackFunction(function(val) { push(!val) }));
-wordPrefix('if', stackFunction(function(bool, block) {
+wordPrefix('not', function(val) { push(!val) });
+wordPrefix('if', function(bool, block) {
   push(bool);
   if(bool !== false) call('!', block);
-}));
+});
 wordInfix('onlyIf', function() { run('if _swap __') }); // infix version
 wordInfix('else', 'if not');
 
@@ -500,7 +555,7 @@ wordInfix('else', 'if not');
 //
 
 // big-ass generic loop recursor, loops backward from default (it's more stack friendly)
-wordPrefix('loop', stackFunction(function(list, block, index, newList, forward) {
+wordPrefix('loop', function(list, block, index, newList, forward) {
   var len = pop(deferCall('_len', list));
   var index = Number(index);
   if(index > len) return push(newList); // push the list on the stack so we can chain
@@ -515,58 +570,71 @@ wordPrefix('loop', stackFunction(function(list, block, index, newList, forward) 
   deferCall('_push', newList, newVal);
 
   deferCall('loop', list, block, index + 1, newList, forward);
-}));
+});
 
 // __ each {[value, index, list] pass }
-wordInfix('each', stackFunction(function(list, block) {
+wordInfix('each', function(block, list) {
   deferCall('loop', list, block, 1, [], false);
-}));
+}, '_swap __p');
 
-wordInfix('foreach', stackFunction(function(list, block) {
+wordInfix('foreach', function(list, block) {
   deferCall('loop', list, block, 1, [], true);
-}));
+});
 
-wordInfix('times', stackFunction(function(numTimes, block) {
+wordInfix('times', function(numTimes, block) {
   deferCall('loop', range(1, Number(numTimes) + 1), block, 1, [], true);
-}));
+  pop();
+});
 
 // 
 // List words
 //
 
 wordPrefix('_', function() { push([]) });
-wordInfix('len', stackFunction(function(list) { 
+wordInfix('len', function(list) { 
   push(list.length);
-}));
-wordInfix('push', stackFunction(function(list, item) { list.push(item) }));
-wordInfix('pop', stackFunction(function(list) { push(list.pop()) }));
-wordInfix('drop', stackFunction(function(list) { list.pop() }));
-wordInfix('insert', stackFunction(function(list, index, item) {
+});
+wordInfix('push', function(list, item) { list.push(item) });
+wordInfix('pop', function(list) { push(list.pop()) });
+wordInfix('drop', function(list) { list.pop() });
+wordInfix('insert', function(list, index, item) {
   if(index <= 0) index = list.length + index + 1; // support negative indexing
   list.splice(index - 1, 0, item);
-}));
-wordInfix('set', stackFunction(function(list, index, item) {
+});
+wordInfix('set', function(list, index, item) {
   if(index < 0) index = list.length + index + 1; // support negative indexing
   list[index - 1] = item;
-}));
-wordInfix('get', stackFunction(function(list, index) { 
+});
+wordInfix('get', function(list, index) { 
   if(index < 0) index = list.length + index + 1; // support negative indexing
   push(list[index - 1]);
-}));
-wordInfix('swap', stackFunction(function(list) { run('_insert', defer(list), -1, '_pop', defer(list)) }));
-wordInfix('dup', stackFunction(function(list) { list.push(list.slice(-1)[0]) }));
+});
+wordInfix('swap', function(list) { run('_insert', defer(list), -1, '_pop', defer(list)) });
+wordInfix('dup', function(list) { list.push(list.slice(-1)[0]) });
 
 // 
 // Math words
 //
 
-wordInfix('+', stackFunction(function(a, b) { push(Number(a) + Number(b)); }));
-wordInfix('-', stackFunction(function(a, b) { push(Number(a) - Number(b)); }));
-wordInfix('*', stackFunction(function(a, b) { push(Number(a) * Number(b)); }));
-wordInfix('/', stackFunction(function(a, b) { push(Number(a) / Number(b)); }));
-wordInfix('%', stackFunction(function(a, b) { push(Number(a) % Number(b)); }));
-wordPrefix('print', stackFunction(function(item) { console.log(item); }));
+wordInfix('+', function(a, b) { push(Number(a) + Number(b)); });
+wordInfix('-', function(a, b) { push(Number(a) - Number(b)); });
+wordInfix('*', function(a, b) { push(Number(a) * Number(b)); });
+wordInfix('/', function(a, b) { push(Number(a) / Number(b)); });
+wordInfix('%', function(a, b) { push(Number(a) % Number(b)); });
+wordPrefix('print', function(item) { console.log(item); });
 
 
 // create the root-level block
-$block();
+module();
+
+// setup some helpers for the debugger
+_d = {
+  __p: function() { return module()._parse.toString() },
+  __: function() { return module()._value.toString() },
+  $p: function() { return keys(module().$parse).toString() },
+  $v: function() { return keys(module().$value).toString() },
+}
+
+// test module
+e('life = {module; answer = 42; question = "earth"; ask = { print "The answer is: " .. answer .. ", but what is the question? " .. question .. ", dummy!" }; moduleEnd}');
+e('nest_life = {module; life = life; ask = { life.ask }; moduleEnd}');

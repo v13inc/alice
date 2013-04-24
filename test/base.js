@@ -1,5 +1,5 @@
 var checkStack = function(str, stack) {
-  expect.equal((stack || $block()._value).toString(), str);
+  expect.equal((stack || Alice.module()._value).toString(), str);
 }
 var check42 = function(stack) { checkStack('42', stack) }
 
@@ -99,7 +99,7 @@ describe('parser', function() {
   describe('parse', function() {
     it('should split code into value words seperated by parse words', aliceBlock(function(blockMem) {
       Alice.call('parse', 'one two\tthree four');
-      var _parse = Alice.$block()._parse;
+      var _parse = Alice.module()._parse;
       expect.equal(_parse.toString(), 'one,two,three,four');
     }));
 
@@ -258,21 +258,21 @@ describe('base meta-library', function() {
     it('should be able to use the "if" word', aliceBlock(function(blockMem) {
       Alice.eval('if true {"true value"}');
       expect.equal(Alice.pop(), "true value");
-      $block(true);
+      Alice.module(true);
       Alice.eval('if false {"true value"}');
       expect.equal(Alice.pop(), false);
       expect.equal(Alice.pop(), undefined);
-      $blockEnd();
+      Alice.moduleEnd();
     }));
 
     it('should be able to use the onlyIf word', aliceBlock(function(blockMem) {
       Alice.eval('{"true value"} onlyIf true');
       expect.equal(Alice.pop(), "true value");
-      $block(true);
+      Alice.module(true);
         Alice.eval('{"true value"} onlyIf false');
         expect.equal(Alice.pop(), false);
         expect.equal(Alice.pop(), undefined);
-      $blockEnd();
+      Alice.moduleEnd();
     }));
   });
 

@@ -3,9 +3,9 @@ p = Alice.pop;
 aliceBlock = function(callback) {
   var thisRef = this;
   return function() {
-    var blockMem = Alice.$block(true);
+    var blockMem = Alice.module(true);
     callback.call(thisRef, blockMem);
-    Alice.$blockEnd();
+    Alice.moduleEnd();
   }
 }
 
@@ -18,5 +18,5 @@ aliceWordEqual = function(word, val) {
 }
 
 aliceStackEqual = function(str) {
-  expect.equal($block()._value.toString(), str);
+  expect.equal(module()._value.toString(), str);
 }

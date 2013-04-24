@@ -1,3 +1,4 @@
+#!/usr/bin/env alice
 print_geekiness = {[name geek_level evidence]
   print name .. " is a (" .. geek_level .. ") geek! He even " .. evidence .. "!!"
 }
